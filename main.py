@@ -20,6 +20,7 @@ handler = WebhookHandler(os.environ.get("LINE_CHANNEL_SECRET"))
 OCR_SPACE_API_KEY = os.environ.get("OCR_SPACE_API_KEY", "")
 OCR_SPACE_URL = "https://api.ocr.space/parse/image"
 OCR_MAX_BYTES = 900_000  # free plan จำกัด 1 MB
+DEBUG_OCR = os.environ.get("DEBUG_OCR") == "1"  # ตั้ง 1 เพื่อให้บอทแสดงข้อความที่ OCR อ่านได้ตอนอ่านพิกัดไม่สำเร็จ
 
 # ============================================================
 # STATION DATA
@@ -164,8 +165,11 @@ def ocr_space(image_bytes, engine):
 # ============================================================
 # PARSE NOTAM TEXT
 # ============================================================
+# ยอมให้มีช่องว่างแทรกในตัวเลข/จุดทศนิยม เช่น "172314. 10N1020953.90E" (OCR มักอ่านแบบนี้)
+_D = r'[\dOIL]'
 COORD_RE = re.compile(
-    r'([\dOIL]{6}(?:[.,][\dOIL]+)?)\s*N\s*([\dOIL]{7}(?:[.,][\dOIL]+)?)\s*E'
+    r'((?:' + _D + r'[ \t]*){6}(?:[.,][ \t]*(?:' + _D + r'[ \t]*)+)?)N[ \t\n]*'
+    r'((?:' + _D + r'[ \t]*){7}(?:[.,][ \t]*(?:' + _D + r'[ \t]*)+)?)E'
 )
 
 def _fix_digits(s):
@@ -222,7 +226,9 @@ def parse_notam(text):
     info['coord'] = None
     m = COORD_RE.search(t)
     if m:
-        info['coord'] = make_coord(_fix_digits(m.group(1)), _fix_digits(m.group(2)))
+        lat_raw = _fix_digits(re.sub(r'\s+', '', m.group(1)))
+        lon_raw = _fix_digits(re.sub(r'\s+', '', m.group(2)))
+        info['coord'] = make_coord(lat_raw, lon_raw)
 
     # ความสูง  F) lower  G) upper
     m = re.search(r'F\)\s*([\s\S]{1,40}?)\s*[G6]\)\s*([\s\S]{1,40}?)(?:\)|\n|$)', t)
@@ -345,8 +351,10 @@ def handle_image(event):
         img_bytes = prepare_image(raw)
 
         info = None
+        last_text = ""
         for engine in (2, 1):  # ลอง Engine 2 ก่อน ถ้าไม่ได้พิกัดค่อยลอง Engine 1
             text = ocr_space(img_bytes, engine)
+            last_text = text
             print(f"[OCR engine {engine}]\n{text}\n[/OCR]", flush=True)
             parsed = parse_notam(text)
             if info is None or (parsed['coord'] and not info['coord']):
@@ -359,6 +367,8 @@ def handle_image(event):
             reply = format_notam_reply(info, find_top3(tlat, tlon))
         else:
             reply = OCR_FAIL_MSG
+            if DEBUG_OCR:
+                reply += "\n\n[OCR อ่านได้]\n" + last_text[:1500]
     except Exception as e:
         print(f"[OCR error] {e!r}", flush=True)
         reply = OCR_ERROR_MSG
